@@ -1,0 +1,161 @@
+#!/usr/bin/env bash
+# Install Telegram Desktop from the official Linux tarball (td-setup-linux-x64-*.tar.xz).
+# Usage: install-telegram-desktop [archive.tar.xz]
+# With no argument, uses the newest matching archive in ~/Downloads.
+# Installs per-user (never with sudo) to ~/.local/opt/telegram-desktop and adds
+# ~/.local/bin/telegram-desktop, a desktop entry, and the hicolor icon.
+
+set -euo pipefail
+umask 022
+
+readonly script_version='1.0.0'
+readonly app_name='telegram-desktop'
+readonly app_dir="${HOME}/.local/opt/${app_name}"
+readonly bin_dir="${HOME}/.local/bin"
+readonly data_home="${XDG_DATA_HOME:-${HOME}/.local/share}"
+readonly applications_dir="${data_home}/applications"
+readonly icons_root="${data_home}/icons/hicolor"
+readonly icons_dir="${icons_root}/scalable/apps"
+readonly staging_prefix="${HOME}/.local/opt/.${app_name}."
+
+die() { printf 'Error: %s\n' "$*" >&2; exit 1; }
+
+usage() {
+  printf 'Usage: %s [archive.tar.xz]\n' "$(basename -- "$0")"
+  printf 'Installs Telegram Desktop per-user from an official td-setup-linux-x64-*.tar.xz.\n'
+  printf 'Version: %s\n' "$script_version"
+}
+
+case "${1:-}" in
+  -h|--help) usage; exit 0 ;;
+  -V|--version) printf '%s %s\n' "$(basename -- "$0")" "$script_version"; exit 0 ;;
+esac
+(( EUID != 0 )) || die 'run as your normal user, not root/sudo: the install must stay user-writable for the built-in updater.'
+(( $# <= 1 )) || die "too many arguments; run '$(basename -- "$0") --help'"
+[[ $(uname -m) == x86_64 ]] || die "this package is x86_64 only; host is $(uname -m)."
+
+# --- locate and read the archive ----------------------------------------
+if (( $# == 1 )); then
+  archive=$1
+else
+  shopt -s nullglob
+  candidates=("${HOME}/Downloads"/td-setup-linux-x64-*.tar.xz)
+  shopt -u nullglob
+  (( ${#candidates[@]} > 0 )) ||
+    die "no td-setup-linux-x64-*.tar.xz in ${HOME}/Downloads; pass the archive path explicitly."
+  archive=$(ls -1t -- "${candidates[@]}" | head -n 1)
+fi
+
+[[ -f $archive ]] || die "archive not found: $archive"
+[[ -r $archive ]] || die "archive is not readable: $archive"
+archive=$(realpath -- "$archive")
+
+base=$(basename -- "$archive")
+if [[ $base =~ ^td-setup-linux-x64-(.+)\.tar\.xz$ ]]; then
+  version=${BASH_REMATCH[1]}
+else
+  version='unknown'
+fi
+
+mapfile -t entries < <(tar -tJf "$archive") ||
+  die "cannot list archive contents (not a valid .tar.xz?): $archive"
+(( ${#entries[@]} > 0 )) || die "archive is empty: $archive"
+
+# Reject absolute paths and traversal before anything touches the install dir.
+for entry in "${entries[@]}"; do
+  [[ $entry != /* ]] || die "unsafe absolute path in archive: $entry"
+  [[ $entry != *..* ]] || die "unsafe path traversal in archive: $entry"
+  [[ $entry == Telegram || $entry == Telegram/* ]] ||
+    die "unexpected archive member (expected everything under Telegram/): $entry"
+done
+
+for required in 'Telegram/Telegram' 'Telegram/Updater'; do
+  found=0
+  for entry in "${entries[@]}"; do
+    [[ $entry == "$required" ]] && { found=1; break; }
+  done
+  (( found )) || die "archive is missing $required"
+done
+
+# --- extract into a staging dir on the same filesystem -------------------
+mkdir -p -- "${HOME}/.local/opt" "$bin_dir" "$applications_dir" "$icons_dir"
+staging=$(mktemp -d "${staging_prefix}XXXXXX") || die 'cannot create a staging directory'
+trap 'rm -rf -- "$staging"' EXIT
+
+tar -xJf "$archive" -C "$staging" --strip-components=1 \
+  --no-same-owner --no-same-permissions || die "extraction failed: $archive"
+
+if [[ $(head -c 4 -- "$staging/Telegram" | od -An -tx1 | tr -d ' \n') != 7f454c46 ]]; then
+  die 'extracted Telegram is not an ELF executable; refusing to install.'
+fi
+chmod 0755 -- "$staging/Telegram" "$staging/Updater"
+
+# --- atomically swap into place, keeping a rollback on failure -----------
+backup=''
+if [[ -e $app_dir || -L $app_dir ]]; then
+  backup="${app_dir}.old.$$"
+  mv -- "$app_dir" "$backup" || die "cannot move the existing install aside: $app_dir"
+fi
+if ! mv -- "$staging" "$app_dir"; then
+  [[ -n $backup ]] && mv -- "$backup" "$app_dir"
+  die "cannot move the new install into place: $app_dir"
+fi
+trap - EXIT
+[[ -n $backup ]] && rm -rf -- "$backup"
+
+ln -sfn -- "${app_dir}/Telegram" "${bin_dir}/${app_name}" ||
+  die "cannot create launcher: ${bin_dir}/${app_name}"
+
+# --- icon and desktop entry ---------------------------------------------
+cat > "${icons_dir}/org.telegram.desktop.svg" <<'SVG'
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
+  <defs>
+    <linearGradient id="tlogo-a" x1="50%" x2="50%" y1="0%" y2="99.258%">
+      <stop offset="0%" stop-color="#2AABEE"/>
+      <stop offset="100%" stop-color="#229ED9"/>
+    </linearGradient>
+  </defs>
+  <g fill="none" fill-rule="evenodd">
+    <circle cx="64" cy="64" r="64" fill="url(#tlogo-a)" fill-rule="nonzero"/>
+    <path fill="#FFF" fill-rule="nonzero" d="M28.9700376,63.3244248 C47.6273373,55.1957357 60.0684594,49.8368063 66.2934036,47.2476366 C84.0668845,39.855031 87.7600616,38.5708563 90.1672227,38.528 C90.6966555,38.5191258 91.8804274,38.6503351 92.6472251,39.2725385 C93.294694,39.7979149 93.4728387,40.5076237 93.5580865,41.0057381 C93.6433345,41.5038525 93.7494885,42.63857 93.6651041,43.5252052 C92.7019529,53.6451182 88.5344133,78.2034783 86.4142057,89.5379542 C85.5170662,94.3339958 83.750571,95.9420841 82.0403991,96.0994568 C78.3237996,96.4414641 75.5015827,93.6432685 71.9018743,91.2836143 C66.2690414,87.5912212 63.0868492,85.2926952 57.6192095,81.6896017 C51.3004058,77.5256038 55.3966232,75.2369981 58.9976911,71.4967761 C59.9401076,70.5179421 76.3155302,55.6232293 76.6324771,54.2720454 C76.6721165,54.1030573 76.7089039,53.4731496 76.3346867,53.1405352 C75.9604695,52.8079208 75.4081573,52.921662 75.0095933,53.0121213 C74.444641,53.1403447 65.4461175,59.0880351 48.0140228,70.8551922 C45.4598218,72.6091037 43.1463059,73.4636682 41.0734751,73.4188859 C38.7883453,73.3695169 34.3926725,72.1268388 31.1249416,71.0646282 C27.1169366,69.7617838 23.931454,69.0729605 24.208838,66.8603276 C24.3533167,65.7078514 25.9403832,64.5292172 28.9700376,63.3244248 Z"/>
+  </g>
+</svg>
+SVG
+chmod 0644 -- "${icons_dir}/org.telegram.desktop.svg"
+
+cat > "${applications_dir}/${app_name}.desktop" <<EOF
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Telegram Desktop
+GenericName=Instant Messenger
+Comment=New era of messaging
+TryExec=${app_dir}/Telegram
+Exec=${app_dir}/Telegram -- %U
+Icon=org.telegram.desktop
+Terminal=false
+StartupWMClass=TelegramDesktop
+Categories=Chat;Network;InstantMessaging;Qt;
+MimeType=x-scheme-handler/tg;x-scheme-handler/tonsite;x-scheme-handler/ton;
+Keywords=telegram;messenger;chat;
+EOF
+chmod 0644 -- "${applications_dir}/${app_name}.desktop"
+
+if command -v update-desktop-database >/dev/null 2>&1; then
+  update-desktop-database -q "$applications_dir" || true
+fi
+if [[ -f ${icons_root}/index.theme ]] && command -v gtk-update-icon-cache >/dev/null 2>&1; then
+  gtk-update-icon-cache -q -t -f "$icons_root" || true
+fi
+
+# --- report --------------------------------------------------------------
+printf 'Installed Telegram Desktop %s\n' "$version"
+printf '  binary:  %s\n' "${app_dir}/Telegram"
+printf '  command: %s\n' "${bin_dir}/${app_name}"
+printf '  desktop: %s\n' "${applications_dir}/${app_name}.desktop"
+printf '  archive: %s (kept; delete it once the app starts)\n' "$archive"
+if [[ -d ${HOME}/Downloads/Telegram ]]; then
+  printf 'Note: %s still holds an older extracted copy and can be removed.\n' \
+    "${HOME}/Downloads/Telegram"
+fi
+printf 'The built-in updater can now replace the binary in place.\n'
