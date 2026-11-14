@@ -1,7 +1,7 @@
 # telegram-desktop-installer
 
 Per-user installer for the official Telegram Desktop Linux tarball (`td-setup-linux-x64-*.tar.xz`).
-Installs to `~/.local/opt/telegram-desktop` with a launcher, icon and desktop entry; stays user-writable for Telegram's built-in updater.
+Installs `Telegram` and `Updater` to `~/.local/opt/telegram-desktop` with a launcher, icon and desktop entry; stays user-writable for in-place updates.
 
 ## Usage
 
